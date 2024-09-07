@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EC2 instance with direct internet access and Session Manager, similar to Cloud9 setup
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: EC2 instance type
+  SSMUser:
+    Type: String
+    Default: ec2-user
+    Description: User to log in as via Session Manager
+  ImageId:
+    Type: String
+    Default: ami-066784287e358dad1
+    Description: The machin'es image ID. The default is Amazon Linux 2023 on us-east-1
+  ShutdownTime:
+    Type: String
+    Default: "cron(0 22 * * ? *)"
+    Description: Cron expression for shutdown time (default is 10 PM UTC every day)
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: SessionManagerVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+        - Key: Name
+          Value: PublicSubnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SessionManagerSecurityGroup
+      GroupDescription: Security group for EC2 instance with Session Manager
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref ImageId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - !Ref EC2SecurityGroup
+          SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: SessionManagerInstance
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo "${SSMUser} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/ssm-agent-users
+          
+          # Git is missing
+          sudo dnf update
+          sudo dnf install git -y
+
+          # Download and extract VS Code CLI
+          sudo -u ec2-user bash << EOF
+          cd /home/ec2-user
+          curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
+          tar -xf vscode_cli.tar.gz
+          rm vscode_cli.tar.gz
+          EOF
+
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+      Policies:
+        - PolicyName: TargetedDevPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:Describe*'
+                  - 'cloudformation:List*'
+                  - 'cloudformation:Get*'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:DeleteStack'
+                  - 's3:*'
+                  - 'iam:List*'
+                  - 'iam:Get*'
+                  - 'iam:PassRole'
+                  - 'lambda:*'
+                  - 'apigateway:*'
+                  - 'dynamodb:*'
+                  - 'sns:*'
+                  - 'sqs:*'
+                  - 'logs:*'
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: 
+        - !Ref EC2InstanceRole
+
+  CustomSSMDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Session
+      Content:
+        schemaVersion: '1.0'
+        description: 'Document to start a session with custom user'
+        sessionType: 'Standard_Stream'
+        inputs:
+          s3BucketName: ''
+          s3KeyPrefix: ''
+          runAsEnabled: true
+          runAsDefaultUser: !Ref SSMUser
+          shellProfile:
+            windows: ''
+            linux: 'export PS1="[\u@cloud10 \w]$ " && cd /home/ec2-user && bash -l'
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref EC2Instance
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+  PublicSubnetId:
+    Description: Public Subnet ID
+    Value: !Ref PublicSubnet
+  SSMSessionCommand:
+    Description: Command to start a Session Manager session with custom user
+    Value: !Sub "aws ssm start-session --target ${EC2Instance} --document-name ${CustomSSMDocument}"
