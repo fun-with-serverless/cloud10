@@ -154,6 +154,13 @@ Resources:
                   - 'sns:*'
                   - 'sqs:*'
                   - 'logs:*'
+                  - 'ec2:*'
+                  - 'iam:CreateRole'
+                  - 'iam:AttachRolePolicy'
+                  - 'iam:CreateInstanceProfile'
+                  - 'iam:AddRoleToInstanceProfile'
+                  - 'iam:RemoveRoleFromInstanceProfile'
+                  - 'rds:*'
                 Resource: '*'
 
   EC2InstanceProfile:
