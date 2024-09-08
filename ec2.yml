@@ -107,6 +107,7 @@ Resources:
           # Git is missing
           sudo dnf update
           sudo dnf install git -y
+          sudo dnf install nodejs npm git -y
 
           # Download and extract VS Code CLI
           sudo -u ec2-user bash << EOF
